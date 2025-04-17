@@ -1,26 +1,63 @@
 const express = require("express");
 const axios = require("axios");
+const redis = require("redis");
+
 const app = express();
 const PORT = 3000;
+const REDIS_PORT = 6379;
+const REDIS_HOST = "redis"; // nome do container Redis na rede Docker
 
-const API_B_URL = "http://api-b:3001/weather";
+const redisClient = redis.createClient({
+  url: `redis://${REDIS_HOST}:${REDIS_PORT}`,
+});
 
-function getRecommendation(temp) {
-  if (temp > 30) return "Recomenda-se hidratação e protetor solar.";
-  if (temp >= 15) return "O clima está agradável!";
-  return "Recomenda-se usar um casaco.";
-}
+redisClient.connect();
 
 app.get("/recommendation/:city", async (req, res) => {
   const city = req.params.city;
-  try {
-    const response = await axios.get(`${API_B_URL}/${city}`);
-    const { temp, unit } = response.data;
-    const recommendation = getRecommendation(temp);
 
-    res.json({ city, temp, unit, recommendation });
+  try {
+    // Verifica se está no cache
+    const cached = await redisClient.get(city.toLowerCase());
+
+    if (cached) {
+      console.log(`[CACHE] Resultado de ${city} vindo do Redis.`);
+      const result = JSON.parse(cached);
+      result.fromCache = true;
+      return res.json(result);
+    }
+
+    // Se não estiver no cache, busca na API B
+    console.log(`[API B] Buscando dados de ${city}...`);
+    const response = await axios.get(`http://api-b:3001/weather/${city}`);
+    const { temp, unit } = response.data;
+
+    let recommendation = "";
+    if (temp > 30) {
+      recommendation = "Recomendamos se hidratar e usar protetor solar!";
+    } else if (temp > 15) {
+      recommendation = "O clima está agradável!";
+    } else {
+      recommendation = "Recomendamos usar um casaco!";
+    }
+
+    const result = {
+      city,
+      temp,
+      unit,
+      recommendation,
+      fromCache: false,
+    };
+
+    // Salva no Redis com TTL de 60 segundos
+    await redisClient.set(city.toLowerCase(), JSON.stringify(result), {
+      EX: 60,
+    });
+
+    res.json(result);
   } catch (error) {
-    res.status(404).json({ error: "Erro ao buscar dados da cidade." });
+    console.error(`[ERRO] Falha ao buscar dados para ${city}:`, error.message);
+    res.status(500).json({ error: "Erro ao buscar dados da cidade." });
   }
 });
 
